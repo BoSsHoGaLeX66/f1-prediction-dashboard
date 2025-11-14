@@ -18,3 +18,4 @@ class PostgresqlConnector(Block):
 
 if __name__ == "__main__":
     PostgresqlConnector.register_type_and_schema()
+
