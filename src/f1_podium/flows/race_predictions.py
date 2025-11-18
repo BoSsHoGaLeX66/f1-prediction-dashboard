@@ -1,4 +1,5 @@
 from prefect import task, flow
+from prefect.logging import get_run_logger
 import pandas as pd
 from datetime import datetime
 from prefect.cache_policies import NO_CACHE
@@ -6,6 +7,7 @@ from prefect.artifacts import create_table_artifact
 from fastf1.ergast import Ergast
 import numpy as np
 import swifter
+import mlflow
 
 
 # Robust imports that work both as a package and as a script
@@ -33,7 +35,14 @@ except ModuleNotFoundError:  # running as a script
 
 @task
 def make_predictions(data: pd.DataFrame):
-    print("Scheduled")
+    mlflow.set_tracking_uri("http://localhost:5000")
+    model = mlflow.sklearn.load_model("models:/f1_model_prod@champion")
+
+    preds = model.predict_proba(data[model.feature_names_in_])
+    preds = pd.DataFrame(preds, columns=["no_podium", "podium"])
+    pred_data = pd.concat([data, pred], axis=1)[
+        ["driverId", "constructorId", "year", "round", ""]
+    ]
 
 
 @task(cache_policy=NO_CACHE)
@@ -164,7 +173,8 @@ def clean_quali_data(df_quali: pd.DataFrame, df_desc: pd.DataFrame):
             "constructorUrl",
             "constructorName",
             "constructorNationality",
-        ]
+        ],
+        inplace=True,
     )
     df_quali["positionOrder"] = np.nan
     df_quali["statusId"] = np.nan
@@ -174,6 +184,7 @@ def clean_quali_data(df_quali: pd.DataFrame, df_desc: pd.DataFrame):
 
 @task
 def create_pred_data(df_results: pd.DataFrame, df_results_full):
+    logger = get_run_logger()
     # Convert positionOrder to a int and use it to get out target
     df_results.fillna(0, inplace=True)
     df_results["positionOrder"] = df_results["positionOrder"].astype(int)
@@ -204,6 +215,7 @@ def create_pred_data(df_results: pd.DataFrame, df_results_full):
     df_results_full.top_3 = df_results.top_3.astype(int)
 
     for driver in drivers:
+        logger.info(f"Driver: {driver}")
         df_results_full.loc[
             df_results_full["driverId"] == driver, "Finish_Pos_Last_Race"
         ] = df_results_full.loc[
@@ -235,25 +247,80 @@ def create_pred_data(df_results: pd.DataFrame, df_results_full):
             .mean()
         )
 
+    max_round = pd.DataFrame(
+        df_results.groupby(["year"], as_index=False)["round"].max(),
+        columns=["year", "round"],
+    )
+    max_round["year"] = max_round["year"] + 1
+
+    last_race_stats = df_results.merge(
+        max_round, on=["year"], how="left", suffixes=["", "_max_last_szn"]
+    )
+
+    last_race_stats.dropna(inplace=True)
+    lag_df = df_results.copy()
+    lag_df["year"] = lag_df["year"] + 1
+    last_race_stats = last_race_stats.merge(
+        lag_df[
+            [
+                "top3_driver_season_percentage",
+                "driver_avg_finish_pos_season",
+                "Constructor_Top3_Percent",
+                "year",
+                "round",
+                "driverId",
+            ]
+        ],
+        left_on=["year", "round_max_last_szn", "driverId"],
+        right_on=["year", "round", "driverId"],
+        how="left",
+        suffixes=("", "_lag"),
+    )
+
+    last_race_stats = last_race_stats.sort_values(["year", "round"], ascending=True)
+
+    df_results = last_race_stats.copy()
+    df_results.fillna(0, inplace=True)
+
+    df_results.top_3.astype(int)
+
     df_results_full.drop_duplicates(subset=["driverId", "year", "round"], inplace=True)
 
     year = df_results["year"].max()
+
     df_results["Finish_Pos_Last_Race"] = df_results_full.loc[
         df_results_full["year"] == year, "Finish_Pos_Last_Race"
     ]
+
     df_results["Top_3_Last_Race"] = df_results_full.loc[
         df_results_full["year"] == year, "Top_3_Last_Race"
     ]
+
     df_results["Finish_Mean_3"] = df_results_full.loc[
         df_results_full["year"] == year, "Finish_Mean_3"
     ]
+
     df_results["Finish_Mean_5"] = df_results_full.loc[
         df_results_full["year"] == year, "Finish_Mean_5"
     ]
+
     df_results["Finish_Mean_10"] = df_results_full.loc[
         df_results_full["year"] == year, "Finish_Mean_10"
     ]
 
+    create_table_artifact(
+        key="f1-pred-data",
+        table=df_results.to_dict(orient="records"),
+        description="data to be used for prediction",
+    )
+
+    create_table_artifact(
+        key="df-results-full",
+        table=df_results_full.to_dict(orient="records"),
+        description="df_results_full table",
+    )
+    logger.info(f"df_results columns: {df_results.columns}")
+    logger.info(f"Table: {df_results.head()}")
     return df_results
 
 
@@ -267,7 +334,11 @@ async def run_pred(round: int):
     df_data = pd.concat([data, df_quali])
 
     df_proc_data = create_pred_data(
-        df_data.loc[df_data["year"] == df_data["year"].max()], df_data
+        df_data.loc[
+            (df_data["year"] == df_data["year"].max())
+            | (df_data["year"] == df_data["year"].max() - 1)
+        ],
+        df_data,
     )
 
     make_predictions(df_proc_data.loc[df_proc_data["round"] == round])
