@@ -35,14 +35,32 @@ except ModuleNotFoundError:  # running as a script
 
 @task
 def make_predictions(data: pd.DataFrame):
+    logger = get_run_logger()
     mlflow.set_tracking_uri("http://localhost:5000")
     model = mlflow.sklearn.load_model("models:/f1_model_prod@champion")
 
     preds = model.predict_proba(data[model.feature_names_in_])
+    pred_vals = model.predict(data[model.feature_names_in_])
+
     preds = pd.DataFrame(preds, columns=["no_podium", "podium"])
-    pred_data = pd.concat([data, pred], axis=1)[
-        ["driverId", "constructorId", "year", "round", ""]
-    ]
+    pred_vals = pd.DataFrame(pred_vals, columns=["pred"])
+
+    logger.info(preds)
+    logger.info(pred_vals)
+
+    data.reset_index(drop=True, inplace=True)
+
+    pred_data = pd.concat(
+        [data[["driverId", "constructorId", "year", "round"]], preds],
+        axis=1,
+    )
+    logger.info(pred_data)
+
+    create_table_artifact(
+        key="predictions",
+        table=pred_data.to_dict(orient="records"),
+        description="the predicted labs of the data",
+    )
 
 
 @task(cache_policy=NO_CACHE)
@@ -79,6 +97,8 @@ def get_quali_data():
 
     df_quali["year"] = df_desc["season"].values[0]
     df_quali["round"] = df_desc["round"].values[0]
+    df_quali.rename(columns={"position": "grid"}, inplace=True)
+
     return df_quali, df_desc
 
 
@@ -215,12 +235,12 @@ def create_pred_data(df_results: pd.DataFrame, df_results_full):
     df_results_full.top_3 = df_results.top_3.astype(int)
 
     for driver in drivers:
-        logger.info(f"Driver: {driver}")
         df_results_full.loc[
             df_results_full["driverId"] == driver, "Finish_Pos_Last_Race"
         ] = df_results_full.loc[
             df_results_full["driverId"] == driver
         ].positionOrder.shift(1)
+
         df_results_full.loc[
             df_results_full["driverId"] == driver, "Top_3_Last_Race"
         ] = df_results_full.loc[df_results_full["driverId"] == driver].top_3.shift(1)
@@ -279,6 +299,15 @@ def create_pred_data(df_results: pd.DataFrame, df_results_full):
 
     last_race_stats = last_race_stats.sort_values(["year", "round"], ascending=True)
 
+    create_table_artifact(
+        key="last-race-stats", table=last_race_stats.to_dict(orient="records")
+    )
+
+    create_table_artifact(
+        key="df-results-full",
+        table=df_results_full.tail(100).to_dict(orient="records"),
+        description="df_results_full table",
+    )
     df_results = last_race_stats.copy()
     df_results.fillna(0, inplace=True)
 
@@ -286,41 +315,29 @@ def create_pred_data(df_results: pd.DataFrame, df_results_full):
 
     df_results_full.drop_duplicates(subset=["driverId", "year", "round"], inplace=True)
 
-    year = df_results["year"].max()
+    df_results = df_results.merge(
+        df_results_full,
+        how="left",
+        left_on=["driverId", "year", "round"],
+        right_on=["driverId", "year", "round"],
+        suffixes=("", "_extra"),
+    )
 
-    df_results["Finish_Pos_Last_Race"] = df_results_full.loc[
-        df_results_full["year"] == year, "Finish_Pos_Last_Race"
-    ]
+    df_results.drop(
+        columns=[x for x in df_results.columns if "_extra" in x], inplace=True
+    )
 
-    df_results["Top_3_Last_Race"] = df_results_full.loc[
-        df_results_full["year"] == year, "Top_3_Last_Race"
-    ]
-
-    df_results["Finish_Mean_3"] = df_results_full.loc[
-        df_results_full["year"] == year, "Finish_Mean_3"
-    ]
-
-    df_results["Finish_Mean_5"] = df_results_full.loc[
-        df_results_full["year"] == year, "Finish_Mean_5"
-    ]
-
-    df_results["Finish_Mean_10"] = df_results_full.loc[
-        df_results_full["year"] == year, "Finish_Mean_10"
-    ]
-
+    df_results.fillna(0, inplace=True)
+    df_results.drop_duplicates(subset=["driverId", "year", "round"], inplace=True)
     create_table_artifact(
         key="f1-pred-data",
         table=df_results.to_dict(orient="records"),
         description="data to be used for prediction",
     )
 
-    create_table_artifact(
-        key="df-results-full",
-        table=df_results_full.to_dict(orient="records"),
-        description="df_results_full table",
-    )
     logger.info(f"df_results columns: {df_results.columns}")
     logger.info(f"Table: {df_results.head()}")
+
     return df_results
 
 
@@ -333,15 +350,17 @@ async def run_pred(round: int):
 
     df_data = pd.concat([data, df_quali])
 
+    max_year = df_data["year"].max()
     df_proc_data = create_pred_data(
-        df_data.loc[
-            (df_data["year"] == df_data["year"].max())
-            | (df_data["year"] == df_data["year"].max() - 1)
-        ],
+        df_data.loc[(df_data["year"] == max_year) | (df_data["year"] == max_year - 1)],
         df_data,
     )
 
-    make_predictions(df_proc_data.loc[df_proc_data["round"] == round])
+    make_predictions(
+        df_proc_data.loc[
+            (df_proc_data["round"] == round) & (df_proc_data["year"] == max_year)
+        ]
+    )
 
 
 if __name__ == "__main__":
