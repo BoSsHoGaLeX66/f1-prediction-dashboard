@@ -62,6 +62,10 @@ def make_predictions(data: pd.DataFrame):
         description="the predicted labs of the data",
     )
 
+    engine = PostgresqlConnector.load("postgresdb")
+
+    pred_data.to_sql("predictions", engine, if_exists="append", index=False)
+
 
 @task(cache_policy=NO_CACHE)
 def load_data(round: int):
@@ -212,15 +216,19 @@ def create_pred_data(df_results: pd.DataFrame, df_results_full):
 
     df_results_full.fillna(0, inplace=True)
     df_results_full["top_3"] = df_results_full["positionOrder"].astype(int)
+
     df_results["top3_driver_season_percentage"] = df_results.swifter.apply(
         top3_finishes, axis=1, args=(df_results,)
     )
+
     df_results["driver_avg_finish_pos_season"] = df_results.swifter.apply(
         avg_finish_position_season, axis=1, args=(df_results,)
     )
+
     df_results["Constructor_Top3_Percent"] = df_results.swifter.apply(
         constructor_top_3, axis=1, args=(df_results,)
     )
+
     df_results["Top_3_at_circuit"] = df_results.swifter.apply(
         percent_top_3_at_circuit, axis=1, args=(df_results_full,)
     )
@@ -299,15 +307,6 @@ def create_pred_data(df_results: pd.DataFrame, df_results_full):
 
     last_race_stats = last_race_stats.sort_values(["year", "round"], ascending=True)
 
-    create_table_artifact(
-        key="last-race-stats", table=last_race_stats.to_dict(orient="records")
-    )
-
-    create_table_artifact(
-        key="df-results-full",
-        table=df_results_full.tail(100).to_dict(orient="records"),
-        description="df_results_full table",
-    )
     df_results = last_race_stats.copy()
     df_results.fillna(0, inplace=True)
 
@@ -329,6 +328,7 @@ def create_pred_data(df_results: pd.DataFrame, df_results_full):
 
     df_results.fillna(0, inplace=True)
     df_results.drop_duplicates(subset=["driverId", "year", "round"], inplace=True)
+
     create_table_artifact(
         key="f1-pred-data",
         table=df_results.to_dict(orient="records"),
