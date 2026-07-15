@@ -9,19 +9,32 @@ from prefect import task, flow
 from prefect.logging import get_run_logger
 from prefect.cache_policies import NO_CACHE
 import requests
-from sqlalchemy import text
 
 # Robust import that works both as a package and as a script
 try:
-    from f1_podium.blocks.postgresql_conn import PostgresqlConnector
+    from f1_podium.db.connection import DatabaseConnection
+    from f1_podium.db.repositories import (
+        CircuitRepository,
+        ConstructorRepository,
+        DriverRepository,
+        RaceRepository,
+        StatusRepository,
+    )
 except (
     ModuleNotFoundError
 ):  # running as a script: python src/f1_podium/flows/process_data.py
     import sys
     from pathlib import Path
 
-    sys.path.append(str(Path(__file__).resolve().parents[1]))  # add src/f1_podium
-    from blocks.postgresql_conn import PostgresqlConnector
+    sys.path.append(str(Path(__file__).resolve().parents[2]))  # add src
+    from f1_podium.db.connection import DatabaseConnection
+    from f1_podium.db.repositories import (
+        CircuitRepository,
+        ConstructorRepository,
+        DriverRepository,
+        RaceRepository,
+        StatusRepository,
+    )
 
 try:
     from f1_podium.utils.db_checks import (
@@ -35,8 +48,8 @@ except ModuleNotFoundError:  # running as a script
     import sys
     from pathlib import Path
 
-    sys.path.append(str(Path(__file__).resolve().parents[1]))
-    from utils.db_checks import (
+    sys.path.append(str(Path(__file__).resolve().parents[2]))
+    from f1_podium.utils.db_checks import (
         resolve_circuit_id,
         resolve_driver,
         resolve_constructor,
@@ -46,14 +59,14 @@ except ModuleNotFoundError:  # running as a script
 
 
 @task(cache_policy=NO_CACHE)
-def load_sql_data(engine):
+def load_sql_data(connection: DatabaseConnection):
     """Load reference tables required to map race data to local ids."""
-    with engine.begin() as conn:
-        circuits = pd.read_sql("SELECT * FROM circuits", conn)
-        drivers = pd.read_sql("SELECT * FROM drivers", conn)
-        constructors = pd.read_sql("SELECT * FROM constructors", conn)
-        statuses = pd.read_sql("SELECT * FROM statuses", conn)
-    return circuits, constructors, drivers, statuses
+    return (
+        CircuitRepository(connection).get_all(),
+        ConstructorRepository(connection).get_all(),
+        DriverRepository(connection).get_all(),
+        StatusRepository(connection).get_all(),
+    )
 
 
 @task
@@ -82,10 +95,9 @@ def get_race_metadata(race: dict, race_table: dict) -> tuple[int, int]:
     return year, round_num
 
 
-async def get_database_engine():
-    """Load the configured PostgreSQL Prefect block and return its SQLAlchemy engine."""
-    postgres_block = await PostgresqlConnector.load("postgresdb")
-    return postgres_block.get_engine()
+async def get_database_connection():
+    """Load the configured PostgreSQL Prefect block as a database connection."""
+    return await DatabaseConnection.from_prefect_block()
 
 
 def get_next_reference_ids(
@@ -103,15 +115,11 @@ def get_next_reference_ids(
     }
 
 
-def race_round_exists(engine, year: int, round_num: int) -> bool:
+def race_round_exists(
+    race_repository: RaceRepository, year: int, round_num: int
+) -> bool:
     """Return whether race results already include the target season round."""
-    with engine.connect() as conn:
-        existing_round = conn.execute(
-            text("SELECT MAX(round) FROM race_results WHERE year = :year"),
-            {"year": year},
-        ).scalar()
-
-    return existing_round is not None and int(existing_round) >= round_num
+    return race_repository.has_round(year, round_num)
 
 
 def get_result_time_fields(result: dict, status_text: str) -> tuple[str, str]:
@@ -288,7 +296,7 @@ def build_insert_dataframes(
 
 
 def insert_race_data(
-    engine,
+    connection: DatabaseConnection,
     results_df: pd.DataFrame,
     drivers_df: pd.DataFrame | None,
     constructors_df: pd.DataFrame | None,
@@ -296,27 +304,24 @@ def insert_race_data(
     logger,
 ) -> None:
     """Insert reference and race result DataFrames inside one database transaction."""
-    with engine.begin() as conn:
+    driver_repository = DriverRepository(connection)
+    constructor_repository = ConstructorRepository(connection)
+    status_repository = StatusRepository(connection)
+    race_repository = RaceRepository(connection)
+
+    with connection.transaction() as conn:
         if drivers_df is not None and not drivers_df.empty:
-            drivers_df.to_sql(
-                "drivers", conn, if_exists="append", index=False, method="multi"
-            )
+            driver_repository.append(drivers_df, conn=conn)
             logger.info(f"Inserted {len(drivers_df)} new drivers")
         if constructors_df is not None and not constructors_df.empty:
-            constructors_df.to_sql(
-                "constructors", conn, if_exists="append", index=False, method="multi"
-            )
+            constructor_repository.append(constructors_df, conn=conn)
             logger.info(f"Inserted {len(constructors_df)} new constructors")
         if statuses_df is not None and not statuses_df.empty:
-            statuses_df.to_sql(
-                "statuses", conn, if_exists="append", index=False, method="multi"
-            )
+            status_repository.append(statuses_df, conn=conn)
             logger.info(f"Inserted {len(statuses_df)} new statuses")
 
         if not results_df.empty:
-            results_df.to_sql(
-                "race_results", conn, if_exists="append", index=False, method="multi"
-            )
+            race_repository.append(results_df, conn=conn)
             logger.info(f"Inserted {len(results_df)} race result rows")
 
 
@@ -340,14 +345,15 @@ async def get_latest_race() -> int:
 
     year, round_num = get_race_metadata(race, race_table)
 
-    engine = await get_database_engine()
+    connection = await get_database_connection()
+    race_repository = RaceRepository(connection)
 
-    circuits, constructors, drivers, statuses = load_sql_data(engine)
+    circuits, constructors, drivers, statuses = load_sql_data(connection)
     next_reference_ids = get_next_reference_ids(
         circuits, constructors, drivers, statuses
     )
 
-    if race_round_exists(engine, year, round_num):
+    if race_round_exists(race_repository, year, round_num):
         logger.info(
             f"Latest results already present for {year} round {round_num}; skipping"
         )
@@ -370,7 +376,7 @@ async def get_latest_race() -> int:
         data_table, driver_table, constructor_table, status_table
     )
     insert_race_data(
-        engine, results_df, drivers_df, constructors_df, statuses_df, logger
+        connection, results_df, drivers_df, constructors_df, statuses_df, logger
     )
 
     return results_df.shape[0]

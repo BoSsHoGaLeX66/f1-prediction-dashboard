@@ -1,18 +1,24 @@
 from prefect import task, flow
 from prefect.logging import get_run_logger
 import pandas as pd
-from datetime import datetime
 from prefect.cache_policies import NO_CACHE
 from prefect.artifacts import create_table_artifact
 from fastf1.ergast import Ergast
 import numpy as np
-import swifter
+import swifter  # noqa: F401
 import mlflow
 
 
 # Robust imports that work both as a package and as a script
 try:
-    from f1_podium.blocks.postgresql_conn import PostgresqlConnector
+    from f1_podium.db.connection import DatabaseConnection
+    from f1_podium.db.repositories import (
+        CircuitRepository,
+        ConstructorRepository,
+        DriverRepository,
+        PredictionRepository,
+        RaceRepository,
+    )
     from f1_podium.utils.data_utils import (
         top3_finishes,
         avg_finish_position_season,
@@ -23,9 +29,16 @@ except ModuleNotFoundError:  # running as a script
     import sys
     from pathlib import Path
 
-    sys.path.append(str(Path(__file__).resolve().parents[1]))  # add src/f1_podium
-    from blocks.postgresql_conn import PostgresqlConnector
-    from utils.data_utils import (
+    sys.path.append(str(Path(__file__).resolve().parents[2]))  # add src
+    from f1_podium.db.connection import DatabaseConnection
+    from f1_podium.db.repositories import (
+        CircuitRepository,
+        ConstructorRepository,
+        DriverRepository,
+        PredictionRepository,
+        RaceRepository,
+    )
+    from f1_podium.utils.data_utils import (
         top3_finishes,
         avg_finish_position_season,
         constructor_top_3,
@@ -62,33 +75,14 @@ def make_predictions(data: pd.DataFrame):
         description="the predicted labs of the data",
     )
 
-    engine = PostgresqlConnector.load("postgresdb")
-
-    pred_data.to_sql("predictions", engine, if_exists="append", index=False)
+    connection = DatabaseConnection.from_prefect_block_sync()
+    PredictionRepository(connection).append(pred_data)
 
 
 @task(cache_policy=NO_CACHE)
 def load_data(round: int):
-    postgres = PostgresqlConnector.load("postgresdb")
-    engine = postgres.get_engine()
-    data = pd.read_sql(
-        "SELECT * FROM race_results",
-        engine,
-    )
-
-    return data.loc[
-        :,
-        [
-            "driverId",
-            "constructorId",
-            "grid",
-            "positionOrder",
-            "statusId",
-            "year",
-            "round",
-            "circuitId",
-        ],
-    ]
+    connection = DatabaseConnection.from_prefect_block_sync()
+    return RaceRepository(connection).get_prediction_columns()
 
 
 @task
@@ -169,11 +163,10 @@ def map_constructor(row, df_constructors):
 
 @task
 def clean_quali_data(df_quali: pd.DataFrame, df_desc: pd.DataFrame):
-    engine = PostgresqlConnector.load("postgresdb").get_engine()
-    with engine.begin() as conn:
-        df_drivers = pd.read_sql("SELECT * FROM drivers", conn)
-        df_circuits = pd.read_sql("SELECT * FROM circuits", conn)
-        df_constructors = pd.read_sql("SELECT * FROM constructors", conn)
+    connection = DatabaseConnection.from_prefect_block_sync()
+    df_drivers = DriverRepository(connection).get_all()
+    df_circuits = CircuitRepository(connection).get_all()
+    df_constructors = ConstructorRepository(connection).get_all()
 
     circuit_id = get_circuit_id(df_desc["circuitId"].values[0], df_circuits)
     df_quali["circuitId"] = circuit_id
@@ -247,7 +240,9 @@ def create_pred_data(df_results: pd.DataFrame, df_results_full):
             df_results_full["driverId"] == driver, "Finish_Pos_Last_Race"
         ] = df_results_full.loc[
             df_results_full["driverId"] == driver
-        ].positionOrder.shift(1)
+        ].positionOrder.shift(
+            1
+        )
 
         df_results_full.loc[
             df_results_full["driverId"] == driver, "Top_3_Last_Race"
