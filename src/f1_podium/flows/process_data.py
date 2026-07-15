@@ -12,6 +12,7 @@ import requests
 
 # Robust import that works both as a package and as a script
 try:
+    from f1_podium.datasets.builder import DatasetBuilder
     from f1_podium.db.connection import DatabaseConnection
     from f1_podium.db.repositories import (
         CircuitRepository,
@@ -27,6 +28,7 @@ except (
     from pathlib import Path
 
     sys.path.append(str(Path(__file__).resolve().parents[2]))  # add src
+    from f1_podium.datasets.builder import DatasetBuilder
     from f1_podium.db.connection import DatabaseConnection
     from f1_podium.db.repositories import (
         CircuitRepository,
@@ -122,63 +124,6 @@ def race_round_exists(
     return race_repository.has_round(year, round_num)
 
 
-def get_result_time_fields(result: dict, status_text: str) -> tuple[str, str]:
-    """Extract race time and milliseconds for completed or lapped results."""
-    time_obj = result.get("Time")
-    if status_text not in ["Finished", "Lapped"] or not time_obj:
-        return "", ""
-
-    return time_obj.get("time", ""), time_obj.get("millis", "")
-
-
-def get_fastest_lap_fields(result: dict) -> tuple[str, str, str]:
-    """Extract fastest lap number, rank, and lap time from a result payload."""
-    fastest_lap_data = result.get("FastestLap") or {}
-    fastest_lap_time = (fastest_lap_data.get("Time") or {}).get("time", "")
-    return (
-        fastest_lap_data.get("lap", ""),
-        fastest_lap_data.get("rank", ""),
-        fastest_lap_time,
-    )
-
-
-def build_race_result_row(
-    result: dict,
-    driver_id: int,
-    constructor_id: int,
-    status_id: int,
-    year: int,
-    round_num: int,
-    circuit_id: int,
-) -> list:
-    """Build one schema-ordered race result row for insertion."""
-    status_text = result["status"]
-    race_time, millis = get_result_time_fields(result, status_text)
-    fastest_lap, fastest_lap_rank, fastest_lap_time = get_fastest_lap_fields(result)
-
-    return [
-        driver_id,
-        constructor_id,
-        result.get("number"),
-        result.get("grid"),
-        result.get("position"),
-        result.get("positionText"),
-        result.get("position"),
-        result.get("points"),
-        result.get("laps"),
-        race_time,
-        millis,
-        fastest_lap,
-        fastest_lap_rank,
-        fastest_lap_time,
-        0,
-        status_id,
-        year,
-        round_num,
-        circuit_id,
-    ]
-
-
 def stage_race_rows(
     race: dict,
     circuits: pd.DataFrame,
@@ -221,7 +166,7 @@ def stage_race_rows(
             status_table.append(new_status_row)
 
         data_table.append(
-            build_race_result_row(
+            DatasetBuilder.build_race_result_row(
                 result,
                 driver_id,
                 constructor_id,
@@ -233,66 +178,6 @@ def stage_race_rows(
         )
 
     return data_table, driver_table, constructor_table, status_table
-
-
-def dataframe_or_none(rows: list, columns: list[str]) -> pd.DataFrame | None:
-    """Create a DataFrame from rows, or return None when no rows are staged."""
-    if not rows:
-        return None
-
-    return pd.DataFrame(rows, columns=columns)
-
-
-def build_insert_dataframes(
-    data_table: list,
-    driver_table: list,
-    constructor_table: list,
-    status_table: list,
-) -> tuple[pd.DataFrame, pd.DataFrame | None, pd.DataFrame | None, pd.DataFrame | None]:
-    """Convert staged race and reference rows into schema-aligned DataFrames."""
-    drivers_df = dataframe_or_none(
-        driver_table,
-        [
-            "driverId",
-            "driverRef",
-            "number",
-            "code",
-            "forename",
-            "surname",
-            "dob",
-            "nationality",
-        ],
-    )
-    constructors_df = dataframe_or_none(
-        constructor_table,
-        ["constructorId", "constructorRef", "name", "nationality"],
-    )
-    statuses_df = dataframe_or_none(status_table, ["statusId", "status"])
-
-    results_columns = [
-        "driverId",
-        "constructorId",
-        "number",
-        "grid",
-        "position",
-        "positionText",
-        "positionOrder",
-        "points",
-        "laps",
-        "time",
-        "milliseconds",
-        "fastestLap",
-        "rank",
-        "fastestLapTime",
-        "fastestLapSpeed",
-        "statusId",
-        "year",
-        "round",
-        "circuitId",
-    ]
-    results_df = pd.DataFrame(data_table, columns=results_columns)
-
-    return results_df, drivers_df, constructors_df, statuses_df
 
 
 def insert_race_data(
@@ -372,8 +257,10 @@ async def get_latest_race() -> int:
 
     logger.info(f"Prepared {len(data_table)} rows for year={year}, round={round_num}")
 
-    results_df, drivers_df, constructors_df, statuses_df = build_insert_dataframes(
-        data_table, driver_table, constructor_table, status_table
+    results_df, drivers_df, constructors_df, statuses_df = (
+        DatasetBuilder.build_insert_dataframes(
+            data_table, driver_table, constructor_table, status_table
+        )
     )
     insert_race_data(
         connection, results_df, drivers_df, constructors_df, statuses_df, logger
