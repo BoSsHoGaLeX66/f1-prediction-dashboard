@@ -3,7 +3,6 @@ from prefect.logging import get_run_logger
 import pandas as pd
 from prefect.cache_policies import NO_CACHE
 from prefect.artifacts import create_table_artifact
-from fastf1.ergast import Ergast
 import numpy as np
 import mlflow
 
@@ -20,6 +19,7 @@ try:
         RaceRepository,
     )
     from f1_podium.features.engineer import FeatureEngineer
+    from f1_podium.services import FastF1ErgastService
 except ModuleNotFoundError:  # running as a script
     import sys
     from pathlib import Path
@@ -35,6 +35,7 @@ except ModuleNotFoundError:  # running as a script
         RaceRepository,
     )
     from f1_podium.features.engineer import FeatureEngineer
+    from f1_podium.services import FastF1ErgastService
 
 
 @task
@@ -75,17 +76,7 @@ def load_data(round: int):
 
 @task
 def get_quali_data():
-    ergast = Ergast()
-    resp = ergast.get_qualifying_results("current", "last", result_type="pandas")
-
-    df_quali = resp.content[0]
-    df_desc = resp.description
-
-    df_quali["year"] = df_desc["season"].values[0]
-    df_quali["round"] = df_desc["round"].values[0]
-    df_quali.rename(columns={"position": "grid"}, inplace=True)
-
-    return df_quali, df_desc
+    return FastF1ErgastService().get_quali_data()
 
 
 def get_circuit_id(circuitRef, df_circuits):

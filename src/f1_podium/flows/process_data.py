@@ -8,7 +8,6 @@ import pandas as pd
 from prefect import task, flow
 from prefect.logging import get_run_logger
 from prefect.cache_policies import NO_CACHE
-import requests
 
 # Robust import that works both as a package and as a script
 try:
@@ -21,6 +20,7 @@ try:
         RaceRepository,
         StatusRepository,
     )
+    from f1_podium.services import FastF1ErgastService
 except (
     ModuleNotFoundError
 ):  # running as a script: python src/f1_podium/flows/process_data.py
@@ -37,6 +37,7 @@ except (
         RaceRepository,
         StatusRepository,
     )
+    from f1_podium.services import FastF1ErgastService
 
 try:
     from f1_podium.utils.db_checks import (
@@ -74,19 +75,11 @@ def load_sql_data(connection: DatabaseConnection):
 @task
 def get_race_data():
     logger = get_run_logger()
-    resp = requests.get(
-        "https://api.jolpi.ca/ergast/f1/current/last/results/", timeout=15
-    )
-    resp.raise_for_status()
-    payload = resp.json()
-
-    race_table = payload.get("MRData", {}).get("RaceTable", {})
-    races = race_table.get("Races", [])
-    if not races:
+    race, race_table = FastF1ErgastService().get_race_data()
+    if race is None:
         logger.warning("No races found in API response; nothing to do")
         return None, None
 
-    race = races[0]
     return race, race_table
 
 
