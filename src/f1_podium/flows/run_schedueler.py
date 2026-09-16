@@ -1,22 +1,16 @@
 from prefect import task, flow, get_run_logger
 from prefect.deployments.flow_runs import run_deployment
-import fastf1
-from datetime import datetime, timedelta
+from datetime import timedelta
 import pandas as pd
 
+try:
+    from f1_podium.services import FastF1Service
+except ModuleNotFoundError:  # running as a script
+    import sys
+    from pathlib import Path
 
-@task
-def get_schedule():
-    schedule = fastf1.get_event_schedule(datetime.now().year, include_testing=False)
-    curr_date = datetime.utcnow()
-    search_date = curr_date + timedelta(days=7)
-
-    next_race = schedule[
-        (schedule["Session5DateUtc"] > curr_date)
-        & (schedule["Session5DateUtc"] < search_date)
-    ]
-
-    return next_race
+    sys.path.append(str(Path(__file__).resolve().parents[2]))  # add src
+    from f1_podium.services import FastF1Service
 
 
 @task
@@ -34,7 +28,7 @@ def schedule_next_runs(next_race: pd.DataFrame):
 @flow(name="schedule_runs")
 def schedule_runs():
     logger = get_run_logger()
-    next_race = get_schedule()
+    next_race = FastF1Service().get_next_races()
     logger.info("Got the next races")
 
     if next_race.shape[0] >= 1:
@@ -46,4 +40,3 @@ def schedule_runs():
 
 if __name__ == "__main__":
     schedule_runs.serve()
-

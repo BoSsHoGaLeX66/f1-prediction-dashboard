@@ -3,10 +3,10 @@
 import pandas as pd
 from sqlalchemy import text
 
-from f1_podium.db.repositories.base import TableRepository
+from f1_podium.db.repositories.queryable import QueryableRepository
 
 
-class RaceRepository(TableRepository):
+class RaceRepository(QueryableRepository):
     """Read and write race result rows."""
 
     table_name = "race_results"

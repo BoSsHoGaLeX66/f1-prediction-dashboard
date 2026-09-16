@@ -3,7 +3,6 @@ from prefect.logging import get_run_logger
 import pandas as pd
 from prefect.cache_policies import NO_CACHE
 from prefect.artifacts import create_table_artifact
-import numpy as np
 import mlflow
 
 
@@ -19,7 +18,8 @@ try:
         RaceRepository,
     )
     from f1_podium.features.engineer import FeatureEngineer
-    from f1_podium.services import FastF1ErgastService
+    from f1_podium.features.preprocessor import Preprocessor
+    from f1_podium.services import FastF1Service
 except ModuleNotFoundError:  # running as a script
     import sys
     from pathlib import Path
@@ -35,7 +35,8 @@ except ModuleNotFoundError:  # running as a script
         RaceRepository,
     )
     from f1_podium.features.engineer import FeatureEngineer
-    from f1_podium.services import FastF1ErgastService
+    from f1_podium.features.preprocessor import Preprocessor
+    from f1_podium.services import FastF1Service
 
 
 @task
@@ -75,106 +76,6 @@ def load_data(round: int):
 
 
 @task
-def get_quali_data():
-    return FastF1ErgastService().get_quali_data()
-
-
-def get_circuit_id(circuitRef, df_circuits):
-    exists = df_circuits.loc[df_circuits["circuitRef"] == circuitRef]
-    exists = exists.reset_index(drop=True)
-    if not exists.empty:
-        return exists.at[0, "circuitId"]
-
-    return df_circuits["circuitId"].max() + 1
-
-
-def map_driver_id(row, df_drivers):
-    driverRef = row.at["driverId"]
-    exists = df_drivers.loc[df_drivers["driverRef"] == driverRef]
-    exists = exists.reset_index(drop=True)
-    if not exists.empty:
-        return exists.at[0, "driverId"]
-    driver_id = df_drivers["driverId"].max() + 1
-
-    row.at["driverId"] = driver_id
-    df_drivers = DatasetBuilder.append_reference_row(
-        df_drivers,
-        row[
-            "driverId",
-            "driverNumber",
-            "driverCode",
-            "givenName",
-            "familyName",
-            "dateOfBirth",
-            "driverNationality",
-        ],
-    )
-
-    return driver_id
-
-
-def map_constructor(row, df_constructors):
-    constructorRef = row["constructorId"]
-    exists = df_constructors.loc[df_constructors["constructorRef"] == constructorRef]
-    exists = exists.reset_index(drop=True)
-    if not exists.empty:
-        return exists.at[0, "constructorId"]
-
-    constuctor_id = df_constructors["constructorId"].max() + 1
-
-    row.at["constructorId"] = constuctor_id
-    df_constructors = DatasetBuilder.append_reference_row(
-        df_constructors,
-        row[
-            "constructorId",
-            "constructorRef",
-            "constructorName",
-            "consctructorNationality",
-        ],
-    )
-
-    return constuctor_id
-
-
-@task
-def clean_quali_data(df_quali: pd.DataFrame, df_desc: pd.DataFrame):
-    connection = DatabaseConnection.from_prefect_block_sync()
-    df_drivers = DriverRepository(connection).get_all()
-    df_circuits = CircuitRepository(connection).get_all()
-    df_constructors = ConstructorRepository(connection).get_all()
-
-    circuit_id = get_circuit_id(df_desc["circuitId"].values[0], df_circuits)
-    df_quali["circuitId"] = circuit_id
-    df_quali["driverId"] = df_quali.apply(map_driver_id, axis=1, args=(df_drivers,))
-    df_quali["constructorId"] = df_quali.apply(
-        map_constructor, axis=1, args=(df_constructors,)
-    )
-
-    df_quali.drop(
-        columns=[
-            "Q1",
-            "Q2",
-            "Q3",
-            "driverNumber",
-            "driverCode",
-            "driverUrl",
-            "givenName",
-            "familyName",
-            "dateOfBirth",
-            "driverNationality",
-            "constructorUrl",
-            "constructorName",
-            "constructorNationality",
-        ],
-        inplace=True,
-    )
-    df_quali["positionOrder"] = np.nan
-    df_quali["statusId"] = np.nan
-
-    return df_quali
-
-
-@task
 def create_pred_data(df_results: pd.DataFrame, df_results_full):
     logger = get_run_logger()
     df_results = FeatureEngineer.build(df_results, df_results_full)
@@ -194,9 +95,15 @@ def create_pred_data(df_results: pd.DataFrame, df_results_full):
 @flow(name="run_pred")
 async def run_pred(round: int):
     data = load_data(round)
-    df_quali, df_desc = get_quali_data()
+    df_quali, df_desc = FastF1Service().get_quali_data()
 
-    df_quali = clean_quali_data(df_quali, df_desc)
+    connection = DatabaseConnection.from_prefect_block_sync()
+    preprocessor = Preprocessor(
+        drivers=DriverRepository(connection).get_all(),
+        circuits=CircuitRepository(connection).get_all(),
+        constructors=ConstructorRepository(connection).get_all(),
+    )
+    df_quali = preprocessor.clean_quali_data(df_quali, df_desc)
 
     df_data = DatasetBuilder.combine_race_and_qualifying_data(data, df_quali)
 

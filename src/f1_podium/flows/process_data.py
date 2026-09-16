@@ -20,7 +20,7 @@ try:
         RaceRepository,
         StatusRepository,
     )
-    from f1_podium.services import FastF1ErgastService
+    from f1_podium.services import FastF1Service
 except (
     ModuleNotFoundError
 ):  # running as a script: python src/f1_podium/flows/process_data.py
@@ -37,7 +37,7 @@ except (
         RaceRepository,
         StatusRepository,
     )
-    from f1_podium.services import FastF1ErgastService
+    from f1_podium.services import FastF1Service
 
 try:
     from f1_podium.utils.db_checks import (
@@ -75,7 +75,7 @@ def load_sql_data(connection: DatabaseConnection):
 @task
 def get_race_data():
     logger = get_run_logger()
-    race, race_table = FastF1ErgastService().get_race_data()
+    race, race_table = FastF1Service().get_race_data()
     if race is None:
         logger.warning("No races found in API response; nothing to do")
         return None, None
